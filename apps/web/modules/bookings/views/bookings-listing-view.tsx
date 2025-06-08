@@ -135,7 +135,7 @@ function BookingsContent({ status }: BookingsProps) {
       beforeEndDate: dateRange?.endDate ? dayjs(dateRange?.endDate).endOf("day").toISOString() : undefined,
     },
   });
-
+  console.log("bookings query: ", query);
   const columns = useMemo(() => {
     const columnHelper = createColumnHelper<RowData>();
 

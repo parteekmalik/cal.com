@@ -35,6 +35,13 @@ type InputByStatus = "upcoming" | "recurring" | "past" | "cancelled" | "unconfir
 const log = logger.getSubLogger({ prefix: ["bookings.get"] });
 
 export const getHandler = async ({ ctx, input }: GetOptions) => {
+  log.info("Starting getHandler", {
+    userId: ctx.user.id,
+    filters: input.filters,
+    limit: input.limit,
+    offset: input.offset,
+  });
+
   // using offset actually because cursor pagination requires a unique column
   // for orderBy, but we don't use a unique column in our orderBy
   const take = input.limit;
@@ -42,6 +49,13 @@ export const getHandler = async ({ ctx, input }: GetOptions) => {
   const { prisma, user } = ctx;
   const defaultStatus = "upcoming";
   const bookingListingByStatus = [input.filters.status || defaultStatus];
+
+  log.info("Fetching user bookings", {
+    userId: user.id,
+    bookingListingByStatus,
+    take,
+    skip,
+  });
 
   const { bookings, recurringInfo, totalCount } = await getAllUserBookings({
     ctx: {
@@ -53,6 +67,13 @@ export const getHandler = async ({ ctx, input }: GetOptions) => {
     take,
     skip,
     filters: input.filters,
+  });
+
+  log.info("Retrieved bookings", {
+    userId: user.id,
+    bookingsCount: bookings.length,
+    totalCount,
+    recurringInfoCount: recurringInfo.length,
   });
 
   return {
@@ -92,6 +113,15 @@ export async function getBookings({
   take: number;
   skip: number;
 }) {
+  log.info("Starting getBookings", {
+    userId: user.id,
+    filters,
+    sort,
+    take,
+    skip,
+    bookingListingByStatus,
+  });
+
   const membershipIdsWhereUserIsAdminOwner = (
     await prisma.membership.findMany({
       where: {
@@ -105,6 +135,11 @@ export async function getBookings({
       },
     })
   ).map((membership) => membership.id);
+
+  log.info("Found admin/owner memberships", {
+    userId: user.id,
+    membershipCount: membershipIdsWhereUserIsAdminOwner.length,
+  });
 
   const membershipConditionWhereUserIsAdminOwner = {
     some: {
@@ -126,6 +161,15 @@ export async function getBookings({
     getUserIdsAndEmailsWhereUserIsAdminOrOwner(prisma, membershipConditionWhereUserIsAdminOwner, user.orgId),
   ]);
 
+  log.info("Retrieved filter data", {
+    userId: user.id,
+    eventTypeIdsFromTeamIdsFilterCount: eventTypeIdsFromTeamIdsFilter?.length,
+    attendeeEmailsFromUserIdsFilterCount: attendeeEmailsFromUserIdsFilter?.length,
+    eventTypeIdsFromEventTypeIdsFilterCount: eventTypeIdsFromEventTypeIdsFilter?.length,
+    eventTypeIdsWhereUserIsAdminOrOwnerCount: eventTypeIdsWhereUserIsAdminOrOwner?.length,
+    userIdsAndEmailsWhereUserIsAdminOrOwnerCount: userIdsAndEmailsWhereUserIsAdminOrOwner?.[0]?.length,
+  });
+
   const bookingQueries: { query: BookingsUnionQuery; tables: (keyof DB)[] }[] = [];
 
   // If user is organization owner/admin, contains organization members emails and ids (organization plan)
@@ -135,6 +179,11 @@ export async function getBookings({
 
   // If userIds filter is provided
   if (!!filters?.userIds && filters.userIds.length > 0) {
+    log.info("Processing userIds filter", {
+      userId: user.id,
+      filterUserIds: filters.userIds,
+    });
+
     const areUserIdsWithinUserOrgOrTeam = filters.userIds.every((userId) =>
       userIdsWhereUserIsAdminOrOwner.includes(userId)
     );
@@ -143,6 +192,11 @@ export async function getBookings({
     // - Throw an error if trying to filter by usersIds that are not within your ORG
     // - Throw an error if trying to filter by usersIds that are not within your TEAM
     if (!areUserIdsWithinUserOrgOrTeam) {
+      log.error("User attempted to access unauthorized bookings", {
+        userId: user.id,
+        attemptedUserIds: filters.userIds,
+        allowedUserIds: userIdsWhereUserIsAdminOrOwner,
+      });
       throw new TRPCError({
         code: "FORBIDDEN",
         message: "You do not have permissions to fetch bookings for specified userIds",
@@ -377,6 +431,13 @@ export async function getBookings({
 
   const orderBy = getOrderBy(bookingListingByStatus, sort);
 
+  log.info("Executing final booking query", {
+    userId: user.id,
+    orderBy,
+    take,
+    skip,
+  });
+
   const getBookingsUnionCompiled = kysely
     .selectFrom(queryUnion.as("union_subquery"))
     .selectAll("union_subquery")
@@ -409,6 +470,12 @@ export async function getBookings({
         .executeTakeFirst()
     )?.bookingCount ?? 0
   );
+
+  log.info("Retrieved bookings from union query", {
+    userId: user.id,
+    bookings: bookingsFromUnion,
+    totalCount,
+  });
 
   const plainBookings = !(bookingsFromUnion?.length === 0)
     ? await kysely
@@ -542,9 +609,21 @@ export async function getBookings({
                 jsonObjectFrom(
                   eb
                     .selectFrom("Attendee")
-                    .select(["Attendee.email"])
+                    .select(["Attendee.email", "Attendee.name"])
                     .whereRef("BookingSeat.attendeeId", "=", "Attendee.id")
-                    .where("Attendee.email", "=", user.email)
+                    .where((qb) => {
+                      const isOwner = eb.exists(
+                        eb
+                          .selectFrom("Booking")
+                          .select("Booking.id")
+                          .whereRef("Booking.id", "=", "BookingSeat.bookingId")
+                          .where("Booking.userId", "=", user.id)
+                      );
+                      return eb.or([
+                        isOwner,
+                        eb.and([eb.not(isOwner), qb("Attendee.email", "=", user.email)]),
+                      ]);
+                    })
                 ).as("attendee"),
               ])
               .whereRef("BookingSeat.bookingId", "=", "Booking.id")
@@ -562,11 +641,12 @@ export async function getBookings({
         .execute()
     : [];
 
-  const [
-    recurringInfoBasic,
-    recurringInfoExtended,
-    // We need all promises to be successful, so we are not using Promise.allSettled
-  ] = await Promise.all([
+  log.info("Retrieved plain bookings", {
+    userId: user.id,
+    bookings: plainBookings,
+  });
+
+  const [recurringInfoBasic, recurringInfoExtended] = await Promise.all([
     prisma.booking.groupBy({
       by: ["recurringEventId"],
       _min: {
@@ -595,6 +675,12 @@ export async function getBookings({
       },
     }),
   ]);
+
+  log.info("Retrieved recurring info", {
+    userId: user.id,
+    recurringInfoBasic,
+    recurringInfoExtended,
+  });
 
   const recurringInfo = recurringInfoBasic.map(
     (
@@ -627,8 +713,6 @@ export async function getBookings({
     }
   );
 
-  // Now enrich bookings with relation data. We could have queried the relation data along with the bookings, but that would cause unnecessary queries to the database.
-  // Because Prisma is also going to query the select relation data sequentially, we are fine querying it separately here as it would be just 1 query instead of 4
   log.info(
     `fetching all bookings for ${user.id}`,
     safeStringify({
@@ -642,9 +726,25 @@ export async function getBookings({
 
   const bookings = await Promise.all(
     plainBookings.map(async (booking) => {
+      log.info("Processing booking", {
+        bookingId: booking.id,
+        booking: booking,
+        hasSeatsReferences: booking.seatsReferences?.length > 0,
+        seatsReferences: booking.seatsReferences,
+        eventType: booking.eventType,
+      });
+
       // If seats are enabled and the event is not set to show attendees, filter out attendees that are not the current user
       if (booking.seatsReferences.length && !booking.eventType?.seatsShowAttendees) {
+        const originalAttendees = [...booking.attendees];
         booking.attendees = booking.attendees.filter((attendee) => attendee.email === user.email);
+
+        log.info("Filtered attendees for seats booking", {
+          bookingId: booking.id,
+          originalAttendees,
+          filteredAttendees: booking.attendees,
+          userEmail: user.email,
+        });
       }
 
       let rescheduler = null;
@@ -662,7 +762,7 @@ export async function getBookings({
         }
       }
 
-      return {
+      const processedBooking = {
         ...booking,
         rescheduler,
         eventType: {
@@ -676,8 +776,23 @@ export async function getBookings({
         startTime: booking.startTime.toISOString(),
         endTime: booking.endTime.toISOString(),
       };
+
+      log.info("Processed booking result", {
+        bookingId: booking.id,
+        processedBooking,
+      });
+
+      return processedBooking;
     })
   );
+
+  log.info("Completed booking processing", {
+    userId: user.id,
+    bookings,
+    recurringInfo,
+    totalCount,
+  });
+
   return { bookings, recurringInfo, totalCount };
 }
 

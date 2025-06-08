@@ -51,6 +51,7 @@ import { AddGuestsDialog } from "@components/dialog/AddGuestsDialog";
 import { ChargeCardDialog } from "@components/dialog/ChargeCardDialog";
 import { EditLocationDialog } from "@components/dialog/EditLocationDialog";
 import { ReassignDialog } from "@components/dialog/ReassignDialog";
+import { RemoveBookingSeatsDialog } from "@components/dialog/RemoveSeatsDialog";
 import { RerouteDialog } from "@components/dialog/RerouteDialog";
 import { RescheduleDialog } from "@components/dialog/RescheduleDialog";
 
@@ -119,6 +120,7 @@ function BookingListItem(booking: BookingItemProps) {
   const [chargeCardDialogIsOpen, setChargeCardDialogIsOpen] = useState(false);
   const [viewRecordingsDialogIsOpen, setViewRecordingsDialogIsOpen] = useState<boolean>(false);
   const [isNoShowDialogOpen, setIsNoShowDialogOpen] = useState<boolean>(false);
+  const [isOpenRemoveSeatsDialog, setIsOpenRemoveSeatsDialog] = useState(false);
   const cardCharged = booking?.payment[0]?.success;
 
   const attendeeList = booking.attendees.map((attendee) => {
@@ -294,8 +296,20 @@ function BookingListItem(booking: BookingItemProps) {
             icon: "user-plus" as const,
           },
         ]),
+    ...(booking.seatsReferences.length && !isBookingInPast
+      ? [
+          {
+            id: "remove_seats",
+            label: t("remove_seats"),
+            onClick: () => {
+              setIsOpenRemoveSeatsDialog(true);
+            },
+            icon: "user-x" as const,
+          },
+        ]
+      : []),
   ];
-
+  console.log(booking);
   if (booking.eventType.schedulingType === SchedulingType.ROUND_ROBIN) {
     editBookingActions.push({
       id: "reassign ",
@@ -506,6 +520,15 @@ function BookingListItem(booking: BookingItemProps) {
         isOpenDialog={isOpenAddGuestsDialog}
         setIsOpenDialog={setIsOpenAddGuestsDialog}
         bookingId={booking.id}
+      />
+      <RemoveBookingSeatsDialog
+        isOpenDialog={isOpenRemoveSeatsDialog}
+        setIsOpenDialog={setIsOpenRemoveSeatsDialog}
+        bookingUid={booking.uid}
+        attendees={booking.seatsReferences.map((seat) => ({
+          email: seat.attendee?.email,
+          referenceUid: seat.referenceUid,
+        }))}
       />
       {booking.paid && booking.payment[0] && (
         <ChargeCardDialog

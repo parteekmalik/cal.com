@@ -74,7 +74,7 @@ async function handler(input: CancelBookingInput) {
     uid,
     allRemainingBookings,
     cancellationReason,
-    seatReferenceUid,
+    seatReferenceUids,
     cancelledBy,
     cancelSubsequentBookings,
     internalNote,
@@ -108,13 +108,14 @@ async function handler(input: CancelBookingInput) {
   }
 
   // If the booking is a seated event and there is no seatReferenceUid we should validate that logged in user is host
-  if (bookingToDelete.eventType?.seatsPerTimeSlot && !seatReferenceUid) {
+  // console.log("bookingToDelete.eventType?.seatsPerTimeSlot", bookingToDelete.eventType?.seatsPerTimeSlot, "seatReferenceUids", seatReferenceUids);
+  if (bookingToDelete.eventType?.seatsPerTimeSlot && !seatReferenceUids?.length) {
     const userIsHost = bookingToDelete.eventType.hosts.find((host) => {
       if (host.user.id === userId) return true;
     });
 
     const userIsOwnerOfEventType = bookingToDelete.eventType.owner?.id === userId;
-
+    // console.log("userIsHost", userIsHost, "userIsOwnerOfEventType", userIsOwnerOfEventType);
     if (!userIsHost && !userIsOwnerOfEventType) {
       throw new HttpError({ statusCode: 401, message: "User not a host of this event" });
     }
@@ -274,14 +275,24 @@ async function handler(input: CancelBookingInput) {
 
   const dataForWebhooks = { evt, webhooks, eventTypeInfo };
 
+  // if (
+  //   !bookingToDelete.eventType?.hosts.find((host) => host.user.id === userId) ||
+  //   bookingToDelete.attendees.find((attendee) => attendee.id === userId) && seatReferenceUids?.length === 1 && seatReferenceUids[0] === bookingToDelete.
+  // ) {
+  //   throw new HttpError({
+  //     statusCode: 400,
+  //     message: "Seat references can only be used for seated bookings.",
+  //   });
+  // }
   // If it's just an attendee of a booking then just remove them from that booking
   const result = await cancelAttendeeSeat(
     {
-      seatReferenceUid: seatReferenceUid,
+      seatReferenceUids: seatReferenceUids,
       bookingToDelete,
     },
     dataForWebhooks,
     bookingToDelete?.eventType?.metadata as EventTypeMetadata
+    // userId,
   );
   if (result)
     return {
